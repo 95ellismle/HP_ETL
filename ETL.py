@@ -152,7 +152,7 @@ class ETL:
                 self._raw_dir.mkdir()
             cmd = ['wget',
                    self._url_fn,
-                   '-O', self._csv_fn]
+                   '-O', str(self._csv_fn)]
             LOG.info("Downloading file...")
             LOG.debug(f"Command: {' '.join(cmd)}")
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -209,7 +209,7 @@ class ETL:
         return df
 
 
-for year in range(2021, 2022):
+for year in range(1995, 2022):
     LOG.info(f'Carrying out year: {year}')
     e = ETL(year)
 
