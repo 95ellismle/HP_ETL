@@ -1,7 +1,8 @@
 import pandas as pd
-import pyarrow.parquet as pq
+import pyarrow.feather as ft
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from hp_config import path as config_path
 
@@ -9,6 +10,7 @@ import logging
 import json
 import subprocess
 import sys
+import yaml
 
 
 # Setup logging
@@ -20,6 +22,9 @@ handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
 handler.setFormatter(formatter)
 LOG.addHandler(handler)
+
+with open('config/categories.json', 'r') as f:
+    categories = json.load(f)
 
 
 def _get_most_common_values(data):
@@ -35,33 +40,36 @@ def _get_most_common_values(data):
 
 class ETL:
 
-    _cols = ('id', 'price', 'date_transfer', 'postcode', 'type', 'is_new', 'tenure', 'paon', 'saon', 'street', 'locality', 'city', 'district', 'county', 'ppd_cat_type', 'record_amendments')
-    _dtypes = {'id': ('str', 'str'),
-               'price': ('int64', 'float64'),
-               'date_transfer': ('datetime', 'datetime64[ns]'),
-               'postcode': ('str', 'str'),
-               'type': ('str', 'str'),
-               'is_new': ('str', bool),
-               'tenure': ('str', 'str'),
-               'paon': ('str', 'str'),
-               'saon': ('str', 'str'),
-               'street': ('str', 'str'),
-               'locality': ('str', 'str'),
-               'city': ('str', 'str'),
-               'district': ('str', 'str'),
-               'county': ('str', 'str'),
-               'ppd_cat_type': ('str', 'str'),
-               'record_amendments': ('str', 'str'),
-               }
-    _data_dir = Path('./data')
-    _postcode_dir = _data_dir / 'postcodes'
+    _cols = ('id', 'price', 'date_transfer', 'postcode', 'dwelling_type', 'is_new', 'tenure', 'paon', 'saon', 'street', 'locality', 'city', 'district', 'county', 'ppd_cat_type', 'record_amendments')
+    _csv_read_dtypes = {'id': 'str',
+                   'price': 'int64',
+                   'date_transfer': 'datetime',
+                   'postcode': 'str',
+                   'dwelling_type': 'str',
+                   'is_new': 'str',
+                   'tenure': 'str',
+                   'paon': 'str',
+                   'saon': 'str',
+                   'street': 'str',
+                   'locality': 'str',
+                   'city': 'str',
+                   'district': 'str',
+                   'county': 'str',
+                   'ppd_cat_type': 'str',
+                   'record_amendments': 'str',
+                   }
+    with open('config/dtypes.yaml', 'r') as f:
+        _df_dtypes = yaml.safe_load(f)
     _raw_dir = Path('./raw')
 
-    _parq_fn = str(_data_dir / f'pp-$<year>.parq')
+    _stats_fn = config_path / 'data_stats.yaml'
     _csv_fn = str(_raw_dir / f'pp-$<year>.csv')
     _url_fn = 'http://prod.publicdata.landregistry.gov.uk.s3-website-eu-west-1.amazonaws.com/pp-$<year>.csv'
-    def __init__(self, year):
-        """Will extract (transform if required) then load the final parquet into the data folder
+
+    data = pd.DataFrame({})
+
+    def extract(self, year):
+        """Will extract (transform if required) then load the final feather into the data folder
 
         Transform is part of the csv extract.
 
@@ -69,19 +77,45 @@ class ETL:
             year: the year to extract
         """
         self.year = str(year)
-        self._parq_fn = Path(self._parq_fn.replace('$<year>', self.year))
-        self._csv_fn = Path(self._csv_fn.replace('$<year>', self.year))
-        self._url_fn = self._url_fn.replace('$<year>', self.year)
-        LOG.debug(f'Parquet Name: {self._parq_fn}')
-        LOG.debug(f'CSV Name: {self._csv_fn}')
-        LOG.debug(f'URL Name: {self._url_fn}')
+        self.csv_fn = Path(self._csv_fn.replace('$<year>', self.year))
+        self.url_fn = self._url_fn.replace('$<year>', self.year)
+
+        LOG.debug(f'CSV Name: {self.csv_fn}')
+        LOG.debug(f'URL Name: {self.url_fn}')
 
         # Extract
         LOG.info('Starting Extract')
-        self._extract(year)
+        self.data = self.data.append(self._extract(year))
 
-        # Transform
+    def _calc_sort_indices(self, df, cols=['price', 'postcode', 'street', 'city', 'county', 'tenure']):
+        """Will calculate the sort indices for the columns in a dataframe
+
+        Args:
+            df: A dataframe to add columns to
+            cols: The cols to add sort indices for
+        Returns:
+            <pd.DataFrame> df with sorted indices
+        """
+        df = df.sort_values('date_transfer')
+        df = df.reset_index(drop=True)
+        self._set_sort_index(cols, df)
+        return df
+
+    def transform(self):
+        """Add some extra columns to improve search speed later"""
+        # Combine house num and saon
+        self.data = self.data.dropna(axis=0, subset=['price'])
+        self.data['paon'] = self.data['paon'] + (', ' + self.data['saon']).fillna('')
+        self.data = self.data.drop('saon', axis=1)
+
+        LOG.info("Setting sort indices")
+        self.data = self._calc_sort_indices(self.data)
+
+        # Need to sort postcode for the pc splicing, but need to sort by date -just once for the web app.
         LOG.info('Creating postcode data structure')
+        non_na_pc_mask = self.data['postcode'] != 'nan'
+        non_na_pc = self.data.loc[non_na_pc_mask, 'postcode'].str.slice(0, 1)
+        self._pc_counts = Counter(non_na_pc)
         self.postcode_data = self._postcode_reshape()
 
         # Create mappings for later
@@ -100,40 +134,73 @@ class ETL:
         LOG.info("Updating and writing map")
         self._update_json(mapping, config_path / 'maps/county_to_pc.json')
 
-        # Load
-        LOG.info('Writing files')
-        self._load(year)
+        # Update stats for base.yaml
+        LOG.info("Updating data stats")
+        num_freehold = self.data.loc[self.data['tenure'] == 'Leasehold', 'tenure']
+        num_freehold = int(num_freehold.count())
+        self._update_stats_yaml({'max_date': self.data['date_transfer'].iloc[0],
+                                 'min_date': self.data['date_transfer'].iloc[-1],
+                                 f'num_freehold_{self.year}': num_freehold,
+                                 f'num_dwelling_type_{self.year}': dict(Counter(self.data['dwelling_type'])),
+                                 f'len_df_{self.year}': len(self.data),
+                                 f'union_poss_postcodes': list(self.postcode_data),
+                                 })
 
-    def _load(self, year):
-        """Will save the dataframe as a parquet in the data folder"""
-        if not self._data_dir.is_dir():
-            LOG.debug("Making data directory")
-            self._data_dir.mkdir()
-        if not self._postcode_dir.is_dir():
-            LOG.debug("Making postcode directory")
-            self._postcode_dir.mkdir()
+    def _write_1_postcode_file(self, pc):
+        """Will write a single postcode file"""
+        # Create file structure
+        dir_name = self._postcode_dir
+        dir_name.mkdir(exist_ok=True)
+
+        fn = dir_name / f'{pc[0]}.feather'
+        df = self.postcode_data[pc]
+        if len(df):
+            df.to_feather(fn)
+
+    def _set_sort_index(self, col, df):
+        """Will set the index to the ordering of the pricing data. This will allow
+        an efficient binary search to be used to splice data in requests.
+
+        Will add an extra column, ..._sort_index to the data which contain the column's
+        ordering.
+
+        Args:
+            col: the column to set the sort index for
+            df: the dataframe to change
+        """
+        if isinstance(col, str):
+            col = [col]
+
+        for c in col:
+            sort_index_name = f'{c}_sort_index'
+            df[sort_index_name] = range(len(df))
+            ind = df[[c, sort_index_name]].sort_values(c)[sort_index_name].values
+            df.loc[:, sort_index_name] = ind
+
+    def load(self, filename):
+        """Will save the dataframe as a feather in the data folder
+
+        Args:
+            filename: The filename for the data file that will be saved.
+        """
+        LOG.info(f"Loading data for {self.year}")
+        filename = Path(filename)
+        self._data_dir = filename.parent
+        self._postcode_dir = self._data_dir / 'postcodes'
+
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._postcode_dir.mkdir(parents=True, exist_ok=True)
 
         # Save the postcode data
         LOG.debug("Writing postcode files")
-        for i in self.postcode_data:
-            # Create file structure
-            dir_name = self._postcode_dir / i[0]
-            fn = dir_name / f'{i[1]}.parq'
-            if not dir_name.is_dir():
-                dir_name.mkdir()
+        self._pc_lens = {}
+        for pc in self.postcode_data:
+            self._write_1_postcode_file(pc)
+        #with ThreadPoolExecutor(8) as executor:
+        #    postcodes = list(self.postcode_data.keys())
+        #    executor.map(self._write_1_postcode_file, postcodes)
 
-            df = self.postcode_data[i]
-
-            # Concat files if they already exist
-            if fn.is_file():
-                df = pd.concat([pd.read_parquet(fn), df])
-                df = df.sort_values('date_transfer')
-
-            df.to_parquet(fn)
-
-        # Save standard data files
-        LOG.debug("Writing data files")
-        self.data.to_parquet(self._parq_fn)
+        self.data.to_feather(filename)
 
     def _update_json(self, data, json_filepath):
         """Will update a json file with the contents of a dictionary
@@ -166,26 +233,74 @@ class ETL:
         with open(json_filepath, 'w') as f:
             json.dump(curr_data, f)
 
+    def _update_stats_yaml(self, stats):
+        """Will update the base.yaml file with stats from the ETL runs
+
+        Will read the current stats yaml and save updated values according to
+        some rules (e.g. minimum or maximum).
+
+        Args:
+            stats: The stats to save from the ETL runs.
+                   For any stats starting with:
+                       min_* the minimum value will be saved
+                       max_* the maximum value will be saved
+        """
+        filepath = self._stats_fn
+        dt_format = '%Y/%m/%d'
+        # Read previous data
+        if not filepath.is_file():
+            data = {}
+        else:
+            with open(filepath, 'r') as f:
+                data = yaml.safe_load(f)
+            if data is None: data = {}
+            for key in data:
+                if key.endswith('_date'):
+                    data[key] = pd.to_datetime(data[key], format=dt_format)
+
+        # Merge current and previous
+        for key in stats:
+            vals = [stats[key]]
+            if key in data:
+                vals.append(data[key])
+
+            if key.startswith('min_'):
+                new_val = min(vals)
+            elif key.startswith('max_'):
+                new_val = max(vals)
+            elif key.startswith('union_'):
+                new_val = stats[key]
+                key = key[6:]
+                if key in data:
+                    new_val = list(set(stats[f'union_{key}']).union(data[key]))
+            else:
+                new_val = stats[key]
+            data[key] = new_val
+
+        # Convert timestamps to string
+        for key in data:
+            val = data[key]
+            if isinstance(val, pd._libs.tslibs.timestamps.Timestamp):
+                val = val.strftime(dt_format)
+            data[key] = val
+
+        # Save merged data
+        with open(filepath, 'w') as f:
+            yaml.safe_dump(data, f)
+
     def _postcode_reshape(self):
         """Create individual dfs for each unique beginning pair of letters."""
-        # We don't want any Null postcodes
-        df = self.data[self.data['postcode'] != 'nan']
-        alphabet = _get_most_common_values(df['postcode'].str.slice(0, 1))
-        LOG.debug(f"Most common first letters: {alphabet}")
-
         d = {}
-        for lett in alphabet:
-            mask = df['postcode'].str.slice(0, 1) == lett
-            new_df = df[mask]
-            if lett != alphabet[-1]:
-                df = df[~mask]
+        c = 0
+        df = self.data
+        for pc in sorted(self._pc_counts):
+            num_vals = self._pc_counts[pc]
+            inds = df['postcode_sort_index'].values[c:c+num_vals]
+            new_df = df.iloc[inds]
 
-            alphabet2 = _get_most_common_values(new_df['postcode'].str.slice(1, 2))
-            for lett2 in alphabet2:
-                mask = new_df['postcode'].str.slice(1, 2) == lett2
-                d[f'{lett}{lett2}'] = new_df[mask]
-                new_df = new_df[~mask]
+            d[pc] = self._calc_sort_indices(new_df)
 
+            c += self._pc_counts[pc]
         return d
 
     def _place_to_postcode(self, col):
@@ -194,66 +309,57 @@ class ETL:
 
         This will then be appended to a yaml file in the config directory
         """
-        df = self.data[self.data['postcode'] != 'nan']
-        df = df[['postcode', col]]
-        df['postcode'] = df['postcode'].str.slice(0, 2)
-
-        df = df.sort_values('postcode')
-        counts = Counter(df['postcode'])
-
-        c = 0
         mapping = {}
-        for pc in sorted(counts):
-            new_df = df.iloc[c:c+counts[pc]]
+        for pc in sorted(self.postcode_data):
+            new_df = self.postcode_data[pc]
 
             for val in new_df[col].unique():
                 mapping.setdefault(val, []).append(pc)
-
-            c += counts[pc]
 
         return mapping
 
     def _extract(self, year):
         """Will read the data file from wherever it can be found.
 
-        Will save the dataframe as self.data
+        Will return the dataframe
 
         Args:
             year: the year that should be extracted
         """
-        # First check the processed files
-        if self._parq_fn.is_file():
-            LOG.info("Reading parquet")
-            self.data = self._read_pp_parq(self._parq_fn)
-        elif self._csv_fn.is_file():
+        # First check we have the raw files
+        if self.csv_fn.is_file():
             LOG.info("Reading CSV")
-            self.data = self._read_pp_csv(self._csv_fn)
+            data = self._read_pp_csv(self.csv_fn)
+
+        # If not re-download
         else:
             if not self._raw_dir.is_dir():
                 LOG.info("Creating raw directory")
                 self._raw_dir.mkdir()
             cmd = ['wget',
-                   self._url_fn,
-                   '-O', str(self._csv_fn)]
+                   self.url_fn,
+                   '-O', str(self.csv_fn)]
             LOG.info("Downloading file...")
             LOG.debug(f"Command: {' '.join(cmd)}")
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if p.returncode != 0:
                 raise SystemExit(f"Quiting: wget return exit code, {p.returncode}")
-            self.data = self._read_pp_csv(self._csv_fn)
+            data = self._read_pp_csv(self.csv_fn)
 
-        # Enforce dtypes from the beginning
-        for col in self._dtypes:
-            dt = self._dtypes[col][1]
-            self.data[col] = self.data[col].astype(dt)
+        data = data.drop(['id', 'locality', 'district', 'ppd_cat_type', 'record_amendments'], axis=1)
+        return data
 
-    def _read_pp_parq(self, fp):
-        """Will read the processed parquet file"""
-        return pd.read_parquet(fp)
+    def _read_pp_feather(self, filepaths):
+        """Will read the processed feather files.
+
+        Args:
+            filepaths: list of filepaths to read
+        """
+        return pd.concat((pd.read_feather(fp) for fp in filepaths))
 
     def _read_pp_csv(self, fn):
         """Will read the raw csv file"""
-        dtypes = {col: self._dtypes[col][0] for col in self._dtypes}
+        dtypes = self._csv_read_dtypes
         datetime_cols = [i for i in dtypes if dtypes[i] == 'datetime']
         for col in datetime_cols:
             dtypes.pop(col)
@@ -263,6 +369,8 @@ class ETL:
                          names=self._cols,
                          dtype=dtypes,
                          parse_dates=datetime_cols)
+
+        # Add back any cols popped earlier
         for col in datetime_cols:
             dtypes[col] = 'datetime'
 
@@ -283,15 +391,37 @@ class ETL:
                           ('S', 'Semi-Detached'),
                           ('T', 'Terraced'),
                           ('O', 'Other'),):
-            df.loc[df['type'] == curr, 'type'] = new
+            df.loc[df['dwelling_type'] == curr, 'dwelling_type'] = new
 
-        # Save prices in thousands
-        df['price'] /= 1000
+        # Set the categories to a fixed num
+        for cat in categories:
+            df[cat] = df[cat].astype(str)
+            new_cats = set(df[cat]).difference(categories[cat])
+            if new_cats:
+                raise SystemExit(f"New categories ({new_cats}) for {cat}, year: {year}")
+            df[cat] = pd.Categorical(df[cat], categories=categories[cat])
+
+        # Enforce dtypes
+        for col in self._df_dtypes:
+            df[col] = df[col].astype(self._df_dtypes[col])
 
         return df
 
 
-for year in range(1995, 1996):
-    LOG.info(f'Carrying out year: {year}')
-    e = ETL(year)
+curr_year = pd.Timestamp.now().year
+#for year in range(1995, curr_year + 1):
+
+chunk_size = 1
+for end_y in range(curr_year, 1995, -chunk_size):
+    s = end_y - chunk_size
+    s = 1995 if s < 1995 else s
+
+    etl = ETL()
+    for year in range(s, end_y):
+        LOG.info(f'Carrying out year: {year}')
+        etl.extract(year)
+
+    etl.transform()
+    etl.load(f'data/{year}/pp-{year}.feather')
+    del etl
 

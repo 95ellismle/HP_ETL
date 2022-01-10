@@ -1,0 +1,17 @@
+id: str
+price: int64
+date_transfer: datetime64[ns]
+postcode: str
+dwelling_type: category
+is_new: bool
+tenure: category
+paon: str
+saon: str
+street: str
+locality: category
+city: category
+district: category
+county: category
+ppd_cat_type: category
+record_amendments: category
+
