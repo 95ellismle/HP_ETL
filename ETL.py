@@ -87,7 +87,9 @@ class ETL:
         LOG.info('Starting Extract')
         self.data = self.data.append(self._extract(year))
 
-    def _calc_sort_indices(self, df, cols=['price', 'postcode', 'street', 'city', 'county', 'tenure']):
+    def _calc_sort_indices(self, df, cols=['price', 'postcode', 'street',
+                                           'city', 'county', 'tenure',
+                                           'dwelling_type']):
         """Will calculate the sort indices for the columns in a dataframe
 
         Args:
