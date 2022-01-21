@@ -8,6 +8,7 @@ from hp_config import path as config_path
 
 import logging
 import json
+import string
 import subprocess
 import sys
 import yaml
@@ -89,7 +90,7 @@ class ETL:
 
     def _calc_sort_indices(self, df, cols=['price', 'postcode', 'street',
                                            'city', 'county', 'tenure',
-                                           'dwelling_type']):
+                                           'dwelling_type', 'is_new']):
         """Will calculate the sort indices for the columns in a dataframe
 
         Args:
@@ -107,7 +108,10 @@ class ETL:
         """Add some extra columns to improve search speed later"""
         # Combine house num and saon
         self.data = self.data.dropna(axis=0, subset=['price'])
-        self.data['paon'] = self.data['paon'] + (', ' + self.data['saon']).fillna('')
+        mask = self.data['saon'] == 'nan'
+        self.data.loc[mask, 'saon'] = ''
+        self.data.loc[~mask, 'saon'] = ', ' + self.data.loc[~mask, 'saon']
+        self.data['paon'] = self.data['paon'] + self.data['saon']
         self.data = self.data.drop('saon', axis=1)
 
         LOG.info("Setting sort indices")
@@ -138,12 +142,8 @@ class ETL:
 
         # Update stats for base.yaml
         LOG.info("Updating data stats")
-        num_freehold = self.data.loc[self.data['tenure'] == 'Leasehold', 'tenure']
-        num_freehold = int(num_freehold.count())
         self._update_stats_yaml({'max_date': self.data['date_transfer'].iloc[0],
                                  'min_date': self.data['date_transfer'].iloc[-1],
-                                 f'num_freehold_{self.year}': num_freehold,
-                                 f'num_dwelling_type_{self.year}': dict(Counter(self.data['dwelling_type'])),
                                  f'len_df_{self.year}': len(self.data),
                                  f'union_poss_postcodes': list(self.postcode_data),
                                  })
@@ -380,7 +380,8 @@ class ETL:
         df['postcode'] = df['postcode'].str.upper().str.replace(' ', '')
         for i in ('county', 'street', 'city', 'district',
                   'paon', 'saon', 'locality'):
-            df[i] = df[i].str.title().str.strip()
+            df[i] = df[i].fillna('')
+            df[i] = df[i].apply(lambda i: string.capwords(str(i)))
         df['is_new'] = df['is_new'] == 'Y'
 
         # Humanise the names
