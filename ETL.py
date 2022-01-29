@@ -4,7 +4,8 @@ import pyarrow.feather as ft
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from hp_config import path as config_path
+
+import hp_config as hpc
 
 import logging
 import json
@@ -13,6 +14,8 @@ import subprocess
 import sys
 import yaml
 
+
+config_path = hpc.path
 
 # Setup logging
 LOG = logging.getLogger(__name__)
@@ -89,8 +92,7 @@ class ETL:
         self.data = self.data.append(self._extract(year))
 
     def _calc_sort_indices(self, df, cols=['price', 'postcode', 'street',
-                                           'city', 'county', 'tenure',
-                                           'dwelling_type', 'is_new']):
+                                           'city', 'county']):
         """Will calculate the sort indices for the columns in a dataframe
 
         Args:
@@ -156,8 +158,28 @@ class ETL:
 
         fn = dir_name / f'{pc[0]}.feather'
         df = self.postcode_data[pc]
-        if len(df):
-            df.to_feather(fn)
+        for is_new in (True, False):
+            df1 = df[df['is_new'] == is_new]
+
+            for dt in hpc.dwelling_type:
+               df2 = df1[df1['dwelling_type'] == dt].drop('is_new', axis=1)
+
+               for tenure in hpc.tenure:
+                   new_df = df2[df2['tenure'] == tenure].drop(['tenure', 'dwelling_type'],
+                                                              axis=1)
+                   if len(df):
+                       is_new = int(is_new)
+                       dwelling_type = hpc.dwelling_type[dt]
+                       tenure = hpc.tenure[tenure]
+                       fn = dir_name / f'{pc}_IN{is_new}_DT{dwelling_type}_TN{tenure}.feather'
+
+                       new_df = new_df.drop('postcode_sort_index', axis=1)
+                       new_df = new_df.sort_values('date_transfer')
+                       if len(new_df) > hpc.sort_index_len:
+                           new_df = self._calc_sort_indices(new_df)
+                       else:
+                           new_df = new_df[[i for i in new_df.columns if 'sort_index' not in i]]
+                       new_df.reset_index(drop=True).to_feather(fn)
 
     def _set_sort_index(self, col, df):
         """Will set the index to the ordering of the pricing data. This will allow
@@ -196,11 +218,11 @@ class ETL:
         # Save the postcode data
         LOG.debug("Writing postcode files")
         self._pc_lens = {}
-        for pc in self.postcode_data:
-            self._write_1_postcode_file(pc)
-        #with ThreadPoolExecutor(8) as executor:
-        #    postcodes = list(self.postcode_data.keys())
-        #    executor.map(self._write_1_postcode_file, postcodes)
+        #for pc in self.postcode_data:
+        #    self._write_1_postcode_file(pc)
+        with ThreadPoolExecutor(8) as executor:
+            postcodes = list(self.postcode_data.keys())
+            executor.map(self._write_1_postcode_file, postcodes)
 
         self.data.to_feather(filename)
 
@@ -299,8 +321,7 @@ class ETL:
             num_vals = self._pc_counts[pc]
             inds = df['postcode_sort_index'].values[c:c+num_vals]
             new_df = df.iloc[inds]
-
-            d[pc] = self._calc_sort_indices(new_df)
+            d[pc] = new_df
 
             c += self._pc_counts[pc]
         return d
@@ -381,7 +402,7 @@ class ETL:
         for i in ('county', 'street', 'city', 'district',
                   'paon', 'saon', 'locality'):
             df[i] = df[i].fillna('')
-            df[i] = df[i].apply(lambda i: string.capwords(str(i)))
+            df[i] = df[i].str.lower()
         df['is_new'] = df['is_new'] == 'Y'
 
         # Humanise the names
