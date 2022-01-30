@@ -101,7 +101,7 @@ class ETL:
         Returns:
             <pd.DataFrame> df with sorted indices
         """
-        df = df.sort_values('date_transfer')
+        df = df.sort_values(['date_transfer', 'county', 'city', 'street'])
         df = df.reset_index(drop=True)
         self._set_sort_index(cols, df)
         return df
@@ -174,7 +174,7 @@ class ETL:
                        fn = dir_name / f'{pc}_IN{is_new}_DT{dwelling_type}_TN{tenure}.feather'
 
                        new_df = new_df.drop('postcode_sort_index', axis=1)
-                       new_df = new_df.sort_values('date_transfer')
+                       new_df = new_df.sort_values(['date_transfer', 'county', 'city', 'street'])
                        if len(new_df) > hpc.sort_index_len:
                            new_df = self._calc_sort_indices(new_df)
                        else:
