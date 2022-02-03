@@ -9,7 +9,6 @@ import hp_config as hpc
 
 import logging
 import json
-import string
 import subprocess
 import sys
 import yaml
@@ -104,6 +103,8 @@ class ETL:
         df = df.sort_values(['date_transfer', 'county', 'city', 'street'])
         df = df.reset_index(drop=True)
         self._set_sort_index(cols, df)
+        for col in cols:
+            assert all(sorted(df[col]) == df.iloc[df[f'{col}_sort_index'].values][col])
         return df
 
     def transform(self):
@@ -167,18 +168,17 @@ class ETL:
                for tenure in hpc.tenure:
                    new_df = df2[df2['tenure'] == tenure].drop(['tenure', 'dwelling_type'],
                                                               axis=1)
-                   if len(df):
+                   if len(new_df):
                        is_new = int(is_new)
                        dwelling_type = hpc.dwelling_type[dt]
                        tenure = hpc.tenure[tenure]
                        fn = dir_name / f'{pc}_IN{is_new}_DT{dwelling_type}_TN{tenure}.feather'
 
                        new_df = new_df.drop('postcode_sort_index', axis=1)
-                       new_df = new_df.sort_values(['date_transfer', 'county', 'city', 'street'])
+                       new_df = new_df.sort_values(['date_transfer', 'county', 'city'])
+                       new_df = new_df[[i for i in new_df.columns if 'sort_index' not in i]]
                        if len(new_df) > hpc.sort_index_len:
                            new_df = self._calc_sort_indices(new_df)
-                       else:
-                           new_df = new_df[[i for i in new_df.columns if 'sort_index' not in i]]
                        new_df.reset_index(drop=True).to_feather(fn)
 
     def _set_sort_index(self, col, df):
@@ -254,6 +254,7 @@ class ETL:
                 curr_data[i] = data[i]
 
         # Save the data
+        json_filepath.parent.mkdir(exist_ok=True)
         with open(json_filepath, 'w') as f:
             json.dump(curr_data, f)
 
@@ -421,7 +422,7 @@ class ETL:
         for cat in categories:
             df[cat] = df[cat].astype(str)
             new_cats = set(df[cat]).difference(categories[cat])
-            if new_cats:
+            if new_cats and '' not in new_cats:
                 raise SystemExit(f"New categories ({new_cats}) for {cat}, year: {year}")
             df[cat] = pd.Categorical(df[cat], categories=categories[cat])
 
@@ -432,20 +433,21 @@ class ETL:
         return df
 
 
-curr_year = pd.Timestamp.now().year
-#for year in range(1995, curr_year + 1):
+if __name__ == '__main__':
+    curr_year = pd.Timestamp.now().year
+    #for year in range(1995, curr_year + 1):
 
-chunk_size = 1
-for end_y in range(curr_year, 1995, -chunk_size):
-    s = end_y - chunk_size
-    s = 1995 if s < 1995 else s
+    chunk_size = 1
+    for end_y in range(curr_year, 1995, -chunk_size):
+        s = end_y - chunk_size
+        s = 1995 if s < 1995 else s
 
-    etl = ETL()
-    for year in range(s, end_y):
-        LOG.info(f'Carrying out year: {year}')
-        etl.extract(year)
+        etl = ETL()
+        for year in range(s, end_y):
+            LOG.info(f'Carrying out year: {year}')
+            etl.extract(year)
 
-    etl.transform()
-    etl.load(f'data/{year}/pp-{year}.feather')
-    del etl
+        etl.transform()
+        etl.load(f'data/{year}/pp-{year}.feather')
+        del etl
 
