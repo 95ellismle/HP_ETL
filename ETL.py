@@ -41,6 +41,10 @@ def _get_most_common_values(data):
     return [i[1] for i in elm_occ[::-1]]
 
 
+pc_dir = Path(__file__).parent / 'config/postcodes_split'
+PC_MAP = {f.stem: pd.read_parquet(f) for f in pc_dir.glob('?.parq')}
+
+
 class ETL:
 
     _cols = ('id', 'price', 'date_transfer', 'postcode', 'dwelling_type', 'is_new', 'tenure', 'paon', 'saon', 'street', 'locality', 'city', 'district', 'county', 'ppd_cat_type', 'record_amendments')
@@ -322,9 +326,10 @@ class ETL:
             num_vals = self._pc_counts[pc]
             inds = df['postcode_sort_index'].values[c:c+num_vals]
             new_df = df.iloc[inds]
-            d[pc] = new_df
+            d[pc] = pd.merge(new_df, PC_MAP[pc], left_on='postcode', right_on='postcode')
 
             c += self._pc_counts[pc]
+
         return d
 
     def _place_to_postcode(self, col):
@@ -434,7 +439,7 @@ class ETL:
 
 
 if __name__ == '__main__':
-    curr_year = pd.Timestamp.now().year
+    curr_year = pd.Timestamp.now().year + 1
     #for year in range(1995, curr_year + 1):
 
     chunk_size = 1
