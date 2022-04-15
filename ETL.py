@@ -167,23 +167,23 @@ class ETL:
             df1 = df[df['is_new'] == is_new]
 
             for dt in hpc.dwelling_type:
-               df2 = df1[df1['dwelling_type'] == dt].drop('is_new', axis=1)
+                df2 = df1[df1['dwelling_type'] == dt].drop('is_new', axis=1)
 
-               for tenure in hpc.tenure:
-                   new_df = df2[df2['tenure'] == tenure].drop(['tenure', 'dwelling_type'],
-                                                              axis=1)
-                   if len(new_df):
-                       is_new = int(is_new)
-                       dwelling_type = hpc.dwelling_type[dt]
-                       tenure = hpc.tenure[tenure]
-                       fn = dir_name / f'{pc}_IN{is_new}_DT{dwelling_type}_TN{tenure}.feather'
+                for tenure in hpc.tenure:
+                    new_df = df2[df2['tenure'] == tenure].drop(['tenure', 'dwelling_type'],
+                                                               axis=1)
+                    if len(new_df):
+                        is_new = int(is_new)
+                        dwelling_type = hpc.dwelling_type[dt]
+                        tenure = hpc.tenure[tenure]
+                        fn = dir_name / f'{pc}_IN{is_new}_DT{dwelling_type}_TN{tenure}.feather'
 
-                       new_df = new_df.drop('postcode_sort_index', axis=1)
-                       new_df = new_df.sort_values(['date_transfer', 'county', 'city'])
-                       new_df = new_df[[i for i in new_df.columns if 'sort_index' not in i]]
-                       if len(new_df) > hpc.sort_index_len:
-                           new_df = self._calc_sort_indices(new_df)
-                       new_df.reset_index(drop=True).to_feather(fn)
+                        new_df = new_df.drop('postcode_sort_index', axis=1)
+                        new_df = new_df.sort_values(['date_transfer', 'county', 'city'])
+                        new_df = new_df[[i for i in new_df.columns if 'sort_index' not in i]]
+                        if len(new_df) > hpc.sort_index_len:
+                            new_df = self._calc_sort_indices(new_df)
+                        new_df.reset_index(drop=True).to_feather(fn)
 
     def _set_sort_index(self, col, df):
         """Will set the index to the ordering of the pricing data. This will allow
@@ -416,12 +416,10 @@ class ETL:
         df.loc[mask, 'tenure'] = 'Freehold'
         df.loc[~mask, 'tenure'] = 'Leasehold'
 
-        for curr, new in (('F', 'Flat/Maisonette'),
-                          ('D', 'Detached'),
-                          ('S', 'Semi-Detached'),
-                          ('T', 'Terraced'),
-                          ('O', 'Other'),):
-            df.loc[df['dwelling_type'] == curr, 'dwelling_type'] = new
+        residential = 'Residential'
+        df['dwelling_type'] = df['dwelling_type'].map({'F': residential, 'D': residential,
+                                                       'S': residential, 'T': residential,
+                                                       'O': 'Commercial'})
 
         # Set the categories to a fixed num
         for cat in categories:
